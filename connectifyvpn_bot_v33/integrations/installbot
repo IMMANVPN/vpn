@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+#
+# installbot wrapper (IMMANVPN + ConnectifyVPN)
+#
+# Tujuan:
+# - Kekalkan autoscript VPN utama (IMMANVPN) TANPA ubah fail asal.
+# - Tambah pilihan ON/OFF untuk bot ConnectifyVPN.
+# - Bagi membolehkan menu utama yang memanggil `installbot` mengurus 2 bot sekali gus.
+#
+# Cara kerja:
+# - Fail asal autoscript biasanya berada di: /usr/bin/installbot
+# - Wrapper ini perlu dipasang sebagai: /usr/local/bin/installbot
+#   (kebanyakan PATH root: /usr/local/bin berada di depan /usr/bin)
+#
+set -euo pipefail
+
+ORIG_INSTALLBOT="/usr/bin/installbot"
+
+# IMMANVPN bot panel (mengikut installer.sh dalam autoscript)
+IMMAN_SCREEN_NAME="scvps_bot"
+IMMAN_RUN_CMD="bbt"
+IMMAN_CONF_DIR="/etc/.maAsiss"
+IMMAN_TOGGLE_FLAG="${IMMAN_CONF_DIR}/bot.conf"
+
+# ConnectifyVPN bot (systemd)
+CONNECTIFY_SERVICE="connectifyvpn-bot.service"
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+status_imman() {
+  if have_cmd screen && screen -list 2>/dev/null | grep -q "\.${IMMAN_SCREEN_NAME}[[:space:]]"; then
+    echo "ON"
+  else
+    echo "OFF"
+  fi
+}
+
+status_connectify() {
+  if have_cmd systemctl && systemctl is-active --quiet "$CONNECTIFY_SERVICE" 2>/dev/null; then
+    echo "ON"
+  else
+    echo "OFF"
+  fi
+}
+
+imman_start() {
+  # Kalau belum pernah setup, serahkan pada installer asal supaya token/config ikut cara asal.
+  if [[ ! -f "$IMMAN_TOGGLE_FLAG" ]]; then
+    if [[ -x "$ORIG_INSTALLBOT" ]]; then
+      echo -e "\n[IMMANVPN] Bot belum dipasang / belum ada config. Jalankan installer asal...\n"
+      "$ORIG_INSTALLBOT" || true
+      return
+    fi
+  fi
+
+  mkdir -p "$IMMAN_CONF_DIR"
+  : > "$IMMAN_TOGGLE_FLAG"
+
+  if have_cmd screen; then
+    if ! screen -list 2>/dev/null | grep -q "\.${IMMAN_SCREEN_NAME}[[:space:]]"; then
+      screen -dmS "$IMMAN_SCREEN_NAME" "$IMMAN_RUN_CMD" || true
+    fi
+  fi
+
+  # Pastikan auto-start (ikut gaya autoscript)
+  if [[ -f /etc/rc.local ]]; then
+    grep -q "screen -dmS ${IMMAN_SCREEN_NAME} ${IMMAN_RUN_CMD}" /etc/rc.local 2>/dev/null || \
+      sed -i "s/^exit 0/screen -dmS ${IMMAN_SCREEN_NAME} ${IMMAN_RUN_CMD}\nexit 0/" /etc/rc.local 2>/dev/null || true
+    chmod +x /etc/rc.local 2>/dev/null || true
+  fi
+}
+
+imman_stop() {
+  if have_cmd screen; then
+    screen -S "$IMMAN_SCREEN_NAME" -X quit 2>/dev/null || true
+  fi
+  rm -f "$IMMAN_TOGGLE_FLAG" 2>/dev/null || true
+  if [[ -f /etc/rc.local ]]; then
+    sed -i "/screen -dmS ${IMMAN_SCREEN_NAME} ${IMMAN_RUN_CMD}/d" /etc/rc.local 2>/dev/null || true
+    chmod +x /etc/rc.local 2>/dev/null || true
+  fi
+}
+
+connectify_start() {
+  if ! have_cmd systemctl; then
+    echo "[ConnectifyVPN] systemctl tiada. Sila guna systemd / Ubuntu/Debian standard." >&2
+    return
+  fi
+  if ! systemctl cat "$CONNECTIFY_SERVICE" >/dev/null 2>&1; then
+    echo -e "\n[ConnectifyVPN] Service belum wujud.\n"
+    echo "Sila install ConnectifyVPN bot dulu. (Rujuk: connectify/integrations/connectify_install.sh)"
+    return
+  fi
+  systemctl daemon-reload || true
+  systemctl enable --now "$CONNECTIFY_SERVICE" || true
+}
+
+connectify_stop() {
+  if have_cmd systemctl; then
+    systemctl disable --now "$CONNECTIFY_SERVICE" 2>/dev/null || true
+  fi
+}
+
+pause() {
+  read -rp $'\nTekan ENTER untuk teruskan... ' _
+}
+
+render_menu() {
+  clear || true
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "   BOT PANEL (IMMANVPN + ConnectifyVPN)"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "Status IMMANVPN Bot      : $(status_imman)"
+  echo "Status ConnectifyVPN Bot : $(status_connectify)"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo " 1) ON  IMMANVPN sahaja"
+  echo " 2) ON  ConnectifyVPN sahaja"
+  echo " 3) ON  Kedua-dua bot"
+  echo " 4) OFF IMMANVPN sahaja"
+  echo " 5) OFF ConnectifyVPN sahaja"
+  echo " 6) OFF Kedua-dua bot"
+  echo " 7) Jalankan installer asal IMMANVPN (fallback)"
+  echo " 0) Kembali"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
+while true; do
+  render_menu
+  read -rp "Pilih menu: " choice
+  case "${choice:-}" in
+    1)
+      connectify_stop
+      imman_start
+      pause
+      ;;
+    2)
+      imman_stop
+      connectify_start
+      pause
+      ;;
+    3)
+      imman_start
+      connectify_start
+      pause
+      ;;
+    4)
+      imman_stop
+      pause
+      ;;
+    5)
+      connectify_stop
+      pause
+      ;;
+    6)
+      imman_stop
+      connectify_stop
+      pause
+      ;;
+    7)
+      if [[ -x "$ORIG_INSTALLBOT" ]]; then
+        "$ORIG_INSTALLBOT" || true
+      else
+        echo "Installer asal tak jumpa di $ORIG_INSTALLBOT" >&2
+        pause
+      fi
+      ;;
+    0)
+      if have_cmd menu; then
+        menu
+      fi
+      exit 0
+      ;;
+    *)
+      echo "Pilihan tak sah."
+      pause
+      ;;
+  esac
+done
